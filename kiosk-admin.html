@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>لوحة إدارة العرض</title>
+<style>
+  body{font-family:system-ui,Tahoma,sans-serif;background:#f4f6f8;margin:0;padding:20px;color:#222}
+  .card{background:#fff;border-radius:10px;padding:20px;max-width:900px;margin:0 auto 20px;box-shadow:0 1px 4px #0001}
+  button{padding:8px 14px;border:0;border-radius:6px;background:#2563eb;color:#fff;cursor:pointer;margin:2px;font-size:14px}
+  button.danger{background:#dc2626} button.gray{background:#6b7280}
+  button:disabled{opacity:.5;cursor:default}
+  input{padding:8px;border:1px solid #ccc;border-radius:6px;box-sizing:border-box;font-size:14px}
+  .item{display:flex;gap:10px;align-items:center;padding:10px 0;border-bottom:1px solid #eee;flex-wrap:wrap}
+  .thumb{width:120px;height:68px;object-fit:cover;background:#000;border-radius:6px;flex-shrink:0}
+  .name{flex:1;min-width:120px;word-break:break-all;font-size:14px}
+  .hidden{display:none}
+  .msg{margin-top:10px;font-size:14px;color:#b45309}
+  .row{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px}
+</style>
+</head>
+<body>
+
+<div class="card" id="loginBox">
+  <h2>تسجيل الدخول</h2>
+  <input id="email" type="email" placeholder="البريد الإلكتروني" style="width:100%;margin-bottom:8px">
+  <input id="pass" type="password" placeholder="كلمة المرور" style="width:100%;margin-bottom:8px">
+  <button id="loginBtn">دخول</button>
+  <div id="loginMsg" class="msg"></div>
+</div>
+
+<div class="card hidden" id="panel">
+  <div class="row">
+    <h2 style="margin:0">إدارة الوسائط</h2>
+    <button class="gray" id="logoutBtn">خروج</button>
+  </div>
+  <p><a href="kiosk-display.html" target="_blank">فتح صفحة العرض</a></p>
+
+  <input type="file" id="file" accept="image/*,video/*" multiple>
+  <button id="uploadBtn">رفع</button>
+  <div id="msg" class="msg"></div>
+
+  <h3>المحتوى الحالي (بالترتيب)</h3>
+  <div id="list"></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+// ====== ضع بياناتك من Supabase هنا ======
+const SUPABASE_URL = 'https://YOUR-PROJECT.supabase.co';
+const SUPABASE_ANON_KEY = 'YOUR-ANON-KEY';
+// =========================================
+const BUCKET = 'kiosk';
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+const $ = id => document.getElementById(id);
+const setMsg = t => $('msg').textContent = t;
+
+function btn(text, cls, fn){
+  const b = document.createElement('button');
+  b.textContent = text; b.className = cls; b.onclick = fn;
+  return b;
+}
+
+function showPanel(on){
+  $('loginBox').classList.toggle('hidden', on);
+  $('panel').classList.toggle('hidden', !on);
+  if(on) loadList();
+}
+
+$('loginBtn').onclick = async () => {
+  const {error} = await sb.auth.signInWithPassword({
+    email: $('email').value.trim(), password: $('pass').value
+  });
+  if(error){ $('loginMsg').textContent = 'بيانات الدخول غير صحيحة'; return; }
+  $('loginMsg').textContent = '';
+  showPanel(true);
+};
+
+$('logoutBtn').onclick = async () => { await sb.auth.signOut(); showPanel(false); };
+
+async function loadList(){
+  const {data, error} = await sb.from('media').select('*').order('sort_order');
+  if(error){ setMsg('خطأ في التحميل: ' + error.message); return; }
+  const list = $('list');
+  list.innerHTML = '';
+  data.forEach((m, i) => {
+    const row = document.createElement('div');
+    row.className = 'item';
+    const thumb = m.type === 'video' ? document.createElement('video') : document.createElement('img');
+    thumb.src = m.url;
+    thumb.className = 'thumb';
+    if(m.type === 'video'){ thumb.muted = true; thumb.preload = 'metadata'; }
+    const name = document.createElement('div');
+    name.className = 'name';
+    name.textContent = (m.type === 'video' ? '🎬 ' : '🖼 ') + m.file_name;
+    row.append(
+      thumb, name,
+      btn('▲', 'gray', () => move(data, i, -1)),
+      btn('▼', 'gray', () => move(data, i, 1)),
+      btn('حذف', 'danger', () => removeItem(m))
+    );
+    list.append(row);
+  });
+  if(!data.length) list.textContent = 'لا يوجد محتوى بعد.';
+}
+
+async function move(list, i, dir){
+  const j = i + dir;
+  if(j < 0 || j >= list.length) return;
+  const a = list[i], b = list[j];
+  await sb.from('media').update({sort_order: b.sort_order}).eq('id', a.id);
+  await sb.from('media').update({sort_order: a.sort_order}).eq('id', b.id);
+  loadList();
+}
+
+async function removeItem(m){
+  if(!confirm('حذف هذا الملف نهائياً؟')) return;
+  await sb.storage.from(BUCKET).remove([m.file_path]);
+  await sb.from('media').delete().eq('id', m.id);
+  loadList();
+}
+
+$('uploadBtn').onclick = async () => {
+  const files = [...$('file').files];
+  if(!files.length) return setMsg('اختر ملفات أولاً');
+
+  $('uploadBtn').disabled = true;
+  try {
+    for(const f of files){
+      setMsg('جاري رفع: ' + f.name);
+      const safe = f.name.replace(/[^\w.\-]/g, '_');
+      const path = Date.now() + '_' + Math.random().toString(36).slice(2,7) + '_' + safe;
+
+      const {error} = await sb.storage.from(BUCKET).upload(path, f, {cacheControl: '3600'});
+      if(error){ setMsg('فشل رفع ' + f.name + ': ' + error.message); return; }
+
+      const {data: urlData} = sb.storage.from(BUCKET).getPublicUrl(path);
+      const type = f.type.startsWith('video') ? 'video' : 'image';
+      const {error: dbErr} = await sb.from('media').insert({
+        file_name: f.name, file_path: path, url: urlData.publicUrl,
+        type, sort_order: Date.now()
+      });
+      if(dbErr){ setMsg('خطأ في الحفظ: ' + dbErr.message); return; }
+    }
+    $('file').value = '';
+    setMsg('تم الرفع بنجاح ✅');
+    loadList();
+  } finally {
+    $('uploadBtn').disabled = false;
+  }
+};
+
+// فحص الجلسة عند فتح الصفحة
+(async () => {
+  const {data} = await sb.auth.getSession();
+  showPanel(!!data.session);
+})();
+</script>
+</body>
+</html>
